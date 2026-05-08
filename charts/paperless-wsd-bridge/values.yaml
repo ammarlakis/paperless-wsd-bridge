@@ -1,0 +1,174 @@
+image:
+  repository: ghcr.io/ammarlakis/paperless-wsd-bridge
+  tag: "0.1.6"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+scanner:
+  target: "http://scanner.example.local:80/WSD/DEVICE"
+  endpointReference: ""
+  retryMinSeconds: 10
+  retryMaxSeconds: 300
+
+callback:
+  url: "http://paperless-wsd-bridge.example.local:6666/wsd"
+  listenHost: "0.0.0.0"
+
+subscription:
+  ttlSeconds: 900
+  renewIntervalSeconds: 600
+
+service:
+  type: ClusterIP
+  port: 6666
+  targetPort: 6666
+  loadBalancerIP: ""
+  annotations: {}
+
+paperless:
+  apiUrl: "http://paperless.example.local:8000"
+  apiToken:
+    value: ""
+    existingSecret: ""
+    existingSecretKey: PAPERLESS_API_TOKEN
+
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+profiles:
+  paperless:
+    id: paperless
+    name: Paperless
+    color: RGB24
+    image_format: jpeg
+    format: tiff-single-uncompressed
+    quality: 85
+    target_folder: /spool
+    spool:
+      root: /spool
+      in_progress_dir: in-progress
+      ready_dir: ready
+      uploaded_dir: uploaded
+      failed_dir: failed
+      debug_dir: debug
+      keep_intermediates: false
+      debug_retrieve_payloads: false
+    post_scan:
+      enabled: true
+      type: paperless_api
+      url_env: PAPERLESS_API_URL
+      token_env: PAPERLESS_API_TOKEN
+      timeout_seconds: 120
+      success_action: delete
+      failure_action: move
+      fields:
+        # Paperless post_document expects tag primary-key IDs here, not tag names.
+        tags: []
+    send_email: false
+    use_pdf: true
+    use_default_ticket: false
+    validate_scan_ticket: false
+    create_scan_job_mode: minimal
+    paper_size: A4
+    resolution: 300
+    input_src: Auto
+  paperless-duplex-fronts:
+    id: paperless_duplex_fronts
+    name: Paperless Duplex Fronts
+    color: RGB24
+    image_format: jpeg
+    format: tiff-single-uncompressed
+    quality: 85
+    target_folder: /spool
+    spool:
+      root: /spool
+      in_progress_dir: in-progress
+      ready_dir: ready
+      uploaded_dir: uploaded
+      failed_dir: failed
+      debug_dir: debug
+      keep_intermediates: false
+      debug_retrieve_payloads: false
+    post_scan:
+      enabled: false
+      type: none
+    manual_duplex:
+      enabled: true
+      role: fronts
+      stage_dir: duplex
+    send_email: false
+    use_pdf: true
+    use_default_ticket: false
+    validate_scan_ticket: false
+    create_scan_job_mode: minimal
+    paper_size: A4
+    resolution: 300
+    input_src: ADF
+  paperless-duplex-backs:
+    id: paperless_duplex_backs
+    name: Paperless Duplex Backs
+    color: RGB24
+    image_format: jpeg
+    format: tiff-single-uncompressed
+    quality: 85
+    target_folder: /spool
+    spool:
+      root: /spool
+      in_progress_dir: in-progress
+      ready_dir: ready
+      uploaded_dir: uploaded
+      failed_dir: failed
+      debug_dir: debug
+      keep_intermediates: false
+      debug_retrieve_payloads: false
+    post_scan:
+      enabled: true
+      type: paperless_api
+      url_env: PAPERLESS_API_URL
+      token_env: PAPERLESS_API_TOKEN
+      timeout_seconds: 120
+      success_action: delete
+      failure_action: move
+      fields:
+        # Paperless post_document expects tag primary-key IDs here, not tag names.
+        tags: []
+    manual_duplex:
+      enabled: true
+      role: backs
+      pairing: latest
+      reverse_backs: true
+      stage_dir: duplex
+    send_email: false
+    use_pdf: true
+    use_default_ticket: false
+    validate_scan_ticket: false
+    create_scan_job_mode: minimal
+    paper_size: A4
+    resolution: 300
+    input_src: ADF
+
+resources: {}
+extraEnv: []
+podSecurityContext:
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+nodeSelector: {}
+tolerations: []
+affinity: {}
+terminationGracePeriodSeconds: 30
+preStopSleepSeconds: 5

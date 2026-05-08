@@ -1,0 +1,32 @@
+image:
+  repository: ghcr.io/ammarlakis/paperless-wsd-bridge
+  tag: "0.1.6"
+
+scanner:
+  target: "http://scanner.example.local:80/WSD/DEVICE"
+  # Optional. Leave empty unless your scanner requires a known endpoint reference.
+  endpointReference: ""
+
+callback:
+  # Must be reachable by the scanner. This is the URL advertised in the WSD subscription.
+  url: "http://paperless-wsd-bridge.example.local:6666/wsd"
+
+service:
+  type: LoadBalancer
+  port: 6666
+  targetPort: 6666
+  loadBalancerIP: ""
+  annotations: {}
+
+paperless:
+  apiUrl: "http://paperless.example.local:8000"
+  apiToken:
+    # Prefer existingSecret for production installs.
+    value: ""
+    existingSecret: "paperless-api-token"
+    existingSecretKey: PAPERLESS_API_TOKEN
+
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""

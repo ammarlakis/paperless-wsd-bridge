@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+# -*- encoding: utf-8 -*-
+
+import email
+import os
+import typing
+from io import BytesIO
+
+import lxml.etree as etree
+import requests
+from PIL import Image, ImageSequence
+
+import wsd_common, \
+    wsd_discovery__operations, \
+    wsd_scan__parsers, \
+    wsd_scan__structures, \
+    wsd_transfer__operations, \
+    wsd_transfer__structures, \
+    wsd_globals
+
+
+class ScanFault(RuntimeError):
+    def __init__(self, operation: str, subcode: str, reason: str):
+        self.operation = operation
+        self.subcode = subcode
+        self.reason = reason
+        message = "%s SOAP fault %s: %s" % (operation, subcode or "unknown", reason or "")
+        super().__init__(message)
+
+
+def wsd_get_scanner_elements(hosted_scan_service: wsd_transfer__structures.HostedService):
+    """
+    Submit a GetScannerElements request, and parse the response.
+    The device should reply with informations about itself,
+    its configuration, its status and the defalt scan ticket
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :return: a tuple of the form (ScannerDescription, ScannerConfiguration, ScannerStatus, ScanTicket)
+    """
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr}
+    x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                  "ws-scan__get_scanner_elements.xml",
+                                  fields)
+
+    re = wsd_common.xml_find(x, ".//sca:ScannerElements")
+    sca_status = wsd_common.xml_find(re, ".//sca:ScannerStatus")
+    sca_config = wsd_common.xml_find(re, ".//sca:ScannerConfiguration")
+    sca_descr = wsd_common.xml_find(re, ".//sca:ScannerDescription")
+    std_ticket_xml = wsd_common.xml_find(re, ".//sca:DefaultScanTicket")
+
+    description = wsd_scan__parsers.parse_scan_description(sca_descr)
+    status = wsd_scan__parsers.parse_scan_status(sca_status)
+    config = wsd_scan__parsers.parse_scan_configuration(sca_config)
+    std_ticket = wsd_scan__parsers.parse_scan_ticket(std_ticket_xml)
+    std_ticket.raw_xml = _raw_scan_ticket_xml(std_ticket_xml)
+
+    return description, config, status, std_ticket
+
+
+def _raw_scan_ticket_xml(default_scan_ticket):
+    namespace = default_scan_ticket.nsmap.get(default_scan_ticket.prefix)
+    if namespace is None:
+        namespace = wsd_common.NSMAP["sca"]
+
+    children = "".join(
+        etree.tostring(child, encoding="unicode")
+        for child in default_scan_ticket
+    )
+    return '<wscn:ScanTicket xmlns:wscn="%s">%s</wscn:ScanTicket>' % (namespace, children)
+
+
+def wsd_validate_scan_ticket(hosted_scan_service: wsd_transfer__structures.HostedService,
+                             tkt: wsd_scan__structures.ScanTicket) \
+        -> typing.Tuple[bool, wsd_scan__structures.ScanTicket]:
+    """
+    Submit a ValidateScanTicket request, and parse the response.
+    Scanner devices can validate scan settings/parameters and fix errors if any. It is recommended to always
+    validate a ticket before submitting the actual scan job.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :param tkt: the ScanTicket to submit for validation purposes
+    :type tkt: wsd_scan__structures.ScanTicket
+    :return: a tuple of the form (boolean, ScanTicket), where the first field is True if no errors were found during\
+    validation, along with the same ticket submitted, or False if errors were found, along with a corrected ticket.
+    """
+
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr}
+    x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                  "ws-scan__validate_scan_ticket.xml",
+                                  {**fields, **tkt.as_map()})
+
+    v = wsd_common.xml_find(x, ".//sca:ValidTicket")
+
+    if v.text == 'true' or v.text == '1':
+        return True, tkt
+    else:
+        dps = wsd_common.xml_find(x, ".//sca:DocumentParameters")
+        tkt.doc_params = wsd_scan__parsers.parse_document_params(dps)
+
+        x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                      "ws-scan__validate_scan_ticket.xml",
+                                      {**fields, **tkt.as_map()})
+
+        v = wsd_common.xml_find(x, ".//sca:ValidTicket")
+
+        if v.text == 'true' or v.text == '1':
+            return True, tkt
+        else:
+            return False, tkt
+
+
+def wsd_create_scan_job(hosted_scan_service: wsd_transfer__structures.HostedService,
+                        tkt: wsd_scan__structures.ScanTicket,
+                        scan_identifier: str = "",
+                        dest_token: str = "",
+                        request_mode: str = "auto") \
+        -> wsd_scan__structures.ScanJob:
+    """
+    Submit a CreateScanJob request, and parse the response.
+    This creates a scan job and starts the image(s) acquisition.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :param tkt: the ScanTicket to submit for validation purposes
+    :type tkt: wsd_scan__structures.ScanTicket
+    :param scan_identifier: a string identifying the device-initiated scan to handle, if any
+    :type scan_identifier: str
+    :param dest_token: a token assigned by the scanner to this client, needed for device-initiated scans
+    :type dest_token: str
+    :param request_mode: create job request strategy: auto, raw, full, minimal, raw-client, or minimal-client
+    :type request_mode: str
+    :return: a ScanJob instance
+    :rtype: wsd_scan__structures.ScanJob
+    """
+
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr,
+              "SCAN_ID": scan_identifier,
+              "DEST_TOKEN": dest_token}
+    print("Creating scan job: scan_identifier=%s destination_token=%s input_source=%s images=%s" %
+          (scan_identifier, dest_token, tkt.doc_params.input_src, tkt.doc_params.images_num),
+          flush=True)
+    if request_mode not in ("auto", "raw", "full", "minimal", "raw-client", "minimal-client"):
+        raise ValueError("Unsupported create_scan_job_mode: %s" % request_mode)
+
+    try:
+        if request_mode == "minimal":
+            x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                          "ws-scan__create_scan_job_minimal.xml",
+                                          {**fields, **tkt.as_map()})
+        elif request_mode == "minimal-client":
+            x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                          "ws-scan__create_scan_job_minimal_client.xml",
+                                          {**fields, **tkt.as_map()})
+        elif request_mode in ("raw", "raw-client") and not tkt.raw_xml:
+            raise RuntimeError("Cannot use %s CreateScanJob mode without raw ticket XML" %
+                               request_mode)
+        elif request_mode == "raw-client":
+            x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                          "ws-scan__create_scan_job_raw_client.xml",
+                                          {**fields, "SCAN_TICKET_XML": tkt.raw_xml})
+        elif request_mode == "raw" or (request_mode == "auto" and tkt.raw_xml):
+            x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                          "ws-scan__create_scan_job_raw.xml",
+                                          {**fields, "SCAN_TICKET_XML": tkt.raw_xml})
+        else:
+            x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                          "ws-scan__create_scan_job.xml",
+                                          {**fields, **tkt.as_map()})
+    except RuntimeError as exc:
+        if request_mode != "auto" or not tkt.raw_xml:
+            raise
+
+        print("Device-initiated CreateScanJob failed, retrying minimal device ticket: %s" % exc,
+              flush=True)
+        try:
+            x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                          "ws-scan__create_scan_job_minimal.xml",
+                                          {**fields, **tkt.as_map()})
+        except RuntimeError as fallback_exc:
+            print("Minimal device CreateScanJob failed, retrying raw ScanTicket only: %s" %
+                  fallback_exc, flush=True)
+            try:
+                x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                              "ws-scan__create_scan_job_raw_client.xml",
+                                              {**fields, "SCAN_TICKET_XML": tkt.raw_xml})
+            except RuntimeError as client_exc:
+                print("Raw ScanTicket-only CreateScanJob failed, retrying minimal platen ticket: %s" %
+                      client_exc, flush=True)
+                x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                              "ws-scan__create_scan_job_minimal_client.xml",
+                                              {**fields, **tkt.as_map()})
+
+    _raise_on_fault(x, "CreateScanJob")
+    x = wsd_common.xml_find(x, ".//sca:CreateScanJobResponse")
+    if x is None:
+        raise RuntimeError("CreateScanJob response did not contain CreateScanJobResponse")
+
+    return wsd_scan__parsers.parse_scan_job(x)
+
+
+def _raise_on_fault(x, operation):
+    if not wsd_common.check_fault(x):
+        return
+
+    subcode = wsd_common.get_xml_str(x, ".//soap:Subcode/soap:Value")
+    reason = wsd_common.get_xml_str(x, ".//soap:Reason/soap:Text")
+    raise ScanFault(operation, subcode, reason)
+
+
+def wsd_cancel_job(hosted_scan_service: wsd_transfer__structures.HostedService,
+                   job: wsd_scan__structures.ScanJob) \
+        -> bool:
+    """
+    Submit a CancelJob request, and parse the response.
+    Stops and aborts the specified scan job.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :param job: the ScanJob instance representing the job to abort
+    :type job: wsd_scan_structures.ScanJob
+    :return: True if the job is found and then aborted, False if the specified job do not exists or already ended.
+    :rtype: bool
+    """
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr,
+              "JOB_ID": job.id}
+    x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                  "ws-scan__cancel_job.xml",
+                                  fields)
+
+    wsd_common.xml_find(x, ".//sca:ClientErrorJobIdNotFound")
+    return x is None
+
+
+def wsd_get_job_elements(hosted_scan_service: wsd_transfer__structures.HostedService,
+                         job: wsd_scan__structures.ScanJob):
+    """
+    Submit a GetJob request, and parse the response.
+    The device should reply with info's about the specified job, such as its status,
+    the ticket submitted for job initiation, the final parameters set effectively used to scan, and a document list.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :param job: the ScanJob instance representing the job to abort
+    :type job: wsd_scan_structures.ScanJob
+    :return: a tuple of the form (JobStatus, ScanTicket, DocumentParams, doclist),\
+    where doclist is a list of document names
+    """
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr,
+              "JOB_ID": job.id}
+    x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                  "ws-scan__get_job_elements.xml",
+                                  fields)
+
+    q = wsd_common.xml_find(x, ".//sca:JobStatus")
+    jstatus = wsd_scan__parsers.parse_job_status(q)
+
+    st = wsd_common.xml_find(x, ".//sca:ScanTicket")
+    tkt = wsd_scan__parsers.parse_scan_ticket(st)
+
+    #dfp = wsd_common.xml_find(x, ".//sca:Documents/sca:DocumentFinalParameters")
+    #dps = wsd_scan__parsers.parse_document_params(dfp)
+    #dlist = [x.text for x in wsd_common.xml_findall(dfp, "sca:Document/sca:DocumentDescription/sca:DocumentName")]
+
+    return jstatus, tkt, None, None #dps, dlist
+
+
+def wsd_get_active_jobs(hosted_scan_service: wsd_transfer__structures.HostedService) \
+        -> typing.List[wsd_scan__structures.JobSummary]:
+    """
+    Submit a GetActiveJobs request, and parse the response.
+    The device should reply with a list of all active scan jobs.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :return: a list of JobSummary elements
+    :rtype: list[wsd_scan__structures.JobSummary]
+    """
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr}
+    x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                  "ws-scan__get_active_jobs.xml",
+                                  fields)
+
+    jsl = []
+    for y in wsd_common.xml_findall(x, ".//sca:JobSummary"):
+        jsl.append(wsd_scan__parsers.parse_job_summary(y))
+
+    return jsl
+
+
+def wsd_get_job_history(hosted_scan_service: wsd_transfer__structures.HostedService) \
+        -> typing.List[wsd_scan__structures.JobSummary]:
+    """
+    Submit a GetJobHistory request, and parse the response.
+    The device should reply with a list of recently ended jobs.
+    Note that some device implementations do not keep or share job history through WSD.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :return: a list of JobSummary elements.
+    """
+    fields = {"FROM": wsd_globals.urn,
+              "TO": hosted_scan_service.ep_ref_addr}
+    x = wsd_common.submit_request({hosted_scan_service.ep_ref_addr},
+                                  "ws-scan__get_job_history.xml",
+                                  fields)
+
+    jsl = []
+    for y in wsd_common.xml_findall(x, ".//sca:JobSummary"):
+        jsl.append(wsd_scan__parsers.parse_job_summary(y))
+
+    return jsl
+
+
+def wsd_retrieve_image(hosted_scan_service: wsd_transfer__structures.HostedService,
+                       job: wsd_scan__structures.ScanJob,
+                       docname: str,
+                       debug_dir: str = None) \
+        -> Image.Image:
+    """
+    Submit a RetrieveImage request, and parse the response.
+    Retrieves a single image from the scanner, if the job has available images to send. If the file format
+    selected in the scan ticket was multipage, retrieves a batch of images instead.
+    Usually the client has approx. 60 seconds to start images acquisition after the creation of a job.
+
+    :param hosted_scan_service: the wsd scan service to query
+    :type hosted_scan_service: wsd_transfer__structures.HostedService
+    :param job: the ScanJob instance representing the queried job.
+    :type job: wsd_scan__structures.ScanJob
+    :param docname: the name assigned to the image to retrieve.
+    :type docname: str
+    :return: the number of images retrieved, and an array of images
+    :rtype: (int, list[PIL.Image])
+    """
+
+    data = wsd_common.message_from_file(wsd_common.abs_path("./templates/ws-scan__retrieve_image.xml"),
+                                        FROM=wsd_globals.urn,
+                                        TO=hosted_scan_service.ep_ref_addr,
+                                        JOB_ID=job.id,
+                                        JOB_TOKEN=job.token,
+                                        DOC_DESCR=docname)
+
+    if wsd_globals.debug:
+        r = etree.fromstring(data.encode("ASCII"), parser=wsd_common.parser)
+        print('##\n## RETRIEVE IMAGE REQUEST\n##\n')
+        print(etree.tostring(r, pretty_print=True, xml_declaration=True).decode("ASCII"))
+
+    r = requests.post(hosted_scan_service.ep_ref_addr, headers=wsd_common.headers, data=data)
+    if debug_dir is not None:
+        os.makedirs(debug_dir, exist_ok=True)
+        with open("%s/%s-retrieve-response.bin" % (debug_dir, docname), "wb") as f:
+            f.write(r.content)
+
+    try:
+        x = etree.XML(r.content)
+        q = wsd_common.xml_find(x, ".//soap:Fault")
+        if q is not None:
+            e = wsd_common.xml_find(q, ".//soap:Code/soap:Subcode/soap:Value").text
+            if e == "wscn:ClientErrorNoImagesAvailable":
+                return Image.NONE
+    except etree.ParseError:
+        content_with_header = (
+            b"MIME-Version: 1.0\r\n"
+            b"Content-Type: " + r.headers["Content-Type"].encode("ascii") + b"\r\n\r\n" +
+            r.content
+        )
+        m = email.message_from_bytes(content_with_header)
+
+        ls = [
+            part for part in m.walk()
+            if part.get_content_maintype() == "image"
+        ]
+        if not ls:
+            raise RuntimeError("RetrieveImage response did not contain an image part")
+
+        if wsd_globals.debug:
+            print('##\n## RETRIEVE IMAGE RESPONSE\n##\n%s\n' % ls[0])
+
+        payload = ls[0].get_payload(decode=True)
+        if debug_dir is not None:
+            with open("%s/%s-image-payload.bin" % (debug_dir, docname), "wb") as f:
+                f.write(payload)
+
+        img = Image.open(BytesIO(payload))
+        print("%s %s %s" % (img.format, img.size, img.mode))
+
+        return img

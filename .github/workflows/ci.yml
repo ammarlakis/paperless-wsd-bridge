@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m compileall src
+
+      - name: Check release script syntax
+        run: bash -n scripts/release.sh
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint Helm chart
+        run: helm lint charts/paperless-wsd-bridge
+
+      - name: Render Helm chart
+        run: helm template paperless-wsd-bridge charts/paperless-wsd-bridge
+
+      - name: Build container image
+        run: docker build --pull=false -t paperless-wsd-bridge:test .

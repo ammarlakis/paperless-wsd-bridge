@@ -1,0 +1,266 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: "Release tag to publish, for example v0.1.6"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      image: ${{ steps.release.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve release metadata
+        id: release
+        shell: bash
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${RELEASE_NAME:-}" ]]; then
+            tag="${RELEASE_NAME}"
+          else
+            version="$(awk '/^version:/ { print $2; exit }' charts/paperless-wsd-bridge/Chart.yaml)"
+            tag="v${version}"
+          fi
+
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v0.1.6: ${tag}" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+
+  binaries:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build standalone Linux binary
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+          pyinstaller \
+            --clean \
+            --onefile \
+            --name paperless-wsd-bridge \
+            --add-data "src/templates:templates" \
+            src/wsd-scan.py
+
+          ./dist/paperless-wsd-bridge --help
+
+          package="paperless-wsd-bridge_${{ needs.meta.outputs.version }}_linux_amd64"
+          mkdir -p "dist/release/${package}"
+          cp dist/paperless-wsd-bridge "dist/release/${package}/"
+          cp README.md LICENSE "dist/release/${package}/"
+          tar -C dist/release -czf "dist/${package}.tar.gz" "${package}"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  helm:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Validate chart version
+        shell: bash
+        run: |
+          chart_version="$(awk '/^version:/ { print $2; exit }' charts/paperless-wsd-bridge/Chart.yaml)"
+          app_version="$(awk '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' charts/paperless-wsd-bridge/Chart.yaml)"
+          values_tag="$(awk '/^  tag:/ { gsub(/"/, "", $2); print $2; exit }' charts/paperless-wsd-bridge/values.yaml)"
+          example_values_tag="$(awk '/^  tag:/ { gsub(/"/, "", $2); print $2; exit }' charts/paperless-wsd-bridge/values.example.yaml)"
+
+          if [[ "${chart_version}" != "${{ needs.meta.outputs.version }}" ]]; then
+            echo "Chart version ${chart_version} does not match ${{ needs.meta.outputs.tag }}" >&2
+            exit 1
+          fi
+
+          if [[ "${app_version}" != "${{ needs.meta.outputs.version }}" ]]; then
+            echo "Chart appVersion ${app_version} does not match ${{ needs.meta.outputs.tag }}" >&2
+            exit 1
+          fi
+
+          if [[ "${values_tag}" != "${{ needs.meta.outputs.version }}" ]]; then
+            echo "values.yaml image tag ${values_tag} does not match ${{ needs.meta.outputs.tag }}" >&2
+            exit 1
+          fi
+
+          if [[ "${example_values_tag}" != "${{ needs.meta.outputs.version }}" ]]; then
+            echo "values.example.yaml image tag ${example_values_tag} does not match ${{ needs.meta.outputs.tag }}" >&2
+            exit 1
+          fi
+
+      - name: Package Helm chart
+        shell: bash
+        run: |
+          mkdir -p dist
+          helm lint charts/paperless-wsd-bridge
+          helm package charts/paperless-wsd-bridge --destination dist
+
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-helm-chart
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  docker:
+    needs: meta
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.meta.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.meta.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.meta.outputs.tag }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  github-release:
+    needs:
+      - meta
+      - binaries
+      - helm
+      - docker
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up git-cliff
+        uses: kenji-miyake/setup-git-cliff@v2
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          printf 'changelog<<EOF\n' >> "${GITHUB_OUTPUT}"
+          if git rev-parse "${{ needs.meta.outputs.tag }}" >/dev/null 2>&1; then
+            git cliff -l >> "${GITHUB_OUTPUT}"
+          else
+            git cliff --unreleased --tag "${{ needs.meta.outputs.tag }}" >> "${GITHUB_OUTPUT}"
+          fi
+          printf 'EOF\n' >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2.4.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: ${{ needs.meta.outputs.tag }}
+          body: ${{ steps.changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.tgz
+          make_latest: true
+
+  update-helm-registry:
+    needs:
+      - meta
+      - github-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: 2336325
+          private-key: ${{ secrets.UPDATE_REGISTRY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Trigger registry update
+        uses: the-actions-org/workflow-dispatch@v4
+        with:
+          repo: "ammarlakis/helm-charts"
+          workflow: Add Chart to Helm Repository
+          ref: "master"
+          wait-for-completion: false
+          inputs: |
+            {
+              "repository": "${{ github.repository }}",
+              "release_name": "${{ needs.meta.outputs.tag }}"
+            }
+          token: ${{ steps.app-token.outputs.token }}

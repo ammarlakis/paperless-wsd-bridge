@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "paperless-wsd-bridge.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperless-wsd-bridge.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "paperless-wsd-bridge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "paperless-wsd-bridge.labels" . | nindent 8 }}
+      annotations:
+        checksum/profiles: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bridge
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http-wsd
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: WSD_SCANNER_TARGET
+              value: {{ .Values.scanner.target | quote }}
+            {{- with .Values.scanner.endpointReference }}
+            - name: WSD_SCANNER_EP_REF
+              value: {{ . | quote }}
+            {{- end }}
+            - name: WSD_CALLBACK_URL
+              value: {{ .Values.callback.url | quote }}
+            - name: WSD_LISTEN_HOST
+              value: {{ .Values.callback.listenHost | quote }}
+            - name: WSD_LISTEN_PORT
+              value: {{ .Values.service.targetPort | quote }}
+            - name: WSD_PROFILES_DIR
+              value: /app/profiles
+            - name: WSD_SUBSCRIPTION_TTL_SECONDS
+              value: {{ .Values.subscription.ttlSeconds | quote }}
+            - name: WSD_RENEW_INTERVAL_SECONDS
+              value: {{ .Values.subscription.renewIntervalSeconds | quote }}
+            - name: WSD_RETRY_MIN_SECONDS
+              value: {{ .Values.scanner.retryMinSeconds | quote }}
+            - name: WSD_RETRY_MAX_SECONDS
+              value: {{ .Values.scanner.retryMaxSeconds | quote }}
+            - name: PAPERLESS_API_URL
+              value: {{ .Values.paperless.apiUrl | quote }}
+            {{- if or .Values.paperless.apiToken.existingSecret .Values.paperless.apiToken.value }}
+            - name: PAPERLESS_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.paperless.apiToken.existingSecret | default (printf "%s-paperless" (include "paperless-wsd-bridge.fullname" .)) }}
+                  key: {{ .Values.paperless.apiToken.existingSecretKey | quote }}
+            {{- end }}
+            {{- range .Values.extraEnv }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: profiles
+              mountPath: /app/profiles
+              readOnly: true
+            - name: spool
+              mountPath: /spool
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep {{ .Values.preStopSleepSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: profiles
+          configMap:
+            name: {{ include "paperless-wsd-bridge.fullname" . }}-profiles
+        - name: spool
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "paperless-wsd-bridge.fullname" . }}-spool
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

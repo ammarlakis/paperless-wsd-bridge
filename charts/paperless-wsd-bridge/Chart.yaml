@@ -1,0 +1,17 @@
+apiVersion: v2
+name: paperless-wsd-bridge
+description: WSD push-scan receiver that uploads scanned documents to Paperless-ngx
+type: application
+version: 0.1.6
+appVersion: "0.1.6"
+home: https://github.com/ammarlakis/paperless-wsd-bridge
+maintainers:
+  - name: Ammar Lakis
+    url: https://github.com/ammarlakis
+sources:
+  - https://github.com/ammarlakis/paperless-wsd-bridge
+keywords:
+  - paperless-ngx
+  - scanner
+  - wsd
+  - document-management

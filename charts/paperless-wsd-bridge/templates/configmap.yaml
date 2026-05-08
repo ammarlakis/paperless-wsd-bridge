@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "paperless-wsd-bridge.fullname" . }}-profiles
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "paperless-wsd-bridge.labels" . | nindent 4 }}
+data:
+  {{- range $name, $profile := .Values.profiles }}
+  {{ $name }}.yaml: |
+    {{- toYaml $profile | nindent 4 }}
+  {{- end }}
