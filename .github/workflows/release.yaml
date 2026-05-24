@@ -272,6 +272,6 @@ jobs:
             {
               "repository": "${{ github.repository }}",
               "release_name": "${{ needs.meta.outputs.tag }}",
-              "asset_name": "${{ needs.meta.outputs.helm_asset }}"
+              "chart_asset": "${{ needs.meta.outputs.helm_asset }}"
             }
           token: ${{ steps.app-token.outputs.token }}
