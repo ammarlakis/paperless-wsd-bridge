@@ -19,6 +19,8 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
+      chart: ${{ steps.release.outputs.chart }}
+      helm_asset: ${{ steps.release.outputs.helm_asset }}
       image: ${{ steps.release.outputs.image }}
     steps:
       - name: Checkout
@@ -45,10 +47,14 @@ jobs:
           fi
 
           version="${tag#v}"
+          chart="$(awk '/^name:/ { print $2; exit }' charts/paperless-wsd-bridge/Chart.yaml)"
+          helm_asset="${chart}-helm-${version}.tgz"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
 
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "chart=${chart}" >> "${GITHUB_OUTPUT}"
+          echo "helm_asset=${helm_asset}" >> "${GITHUB_OUTPUT}"
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
 
   binaries:
@@ -135,6 +141,9 @@ jobs:
           mkdir -p dist
           helm lint charts/paperless-wsd-bridge
           helm package charts/paperless-wsd-bridge --destination dist
+          mv \
+            "dist/${{ needs.meta.outputs.chart }}-${{ needs.meta.outputs.version }}.tgz" \
+            "dist/${{ needs.meta.outputs.helm_asset }}"
 
       - name: Upload Helm chart artifact
         uses: actions/upload-artifact@v4
@@ -235,6 +244,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tgz
+          overwrite_files: true
           make_latest: true
 
   update-helm-registry:
@@ -261,6 +271,7 @@ jobs:
           inputs: |
             {
               "repository": "${{ github.repository }}",
-              "release_name": "${{ needs.meta.outputs.tag }}"
+              "release_name": "${{ needs.meta.outputs.tag }}",
+              "asset_name": "${{ needs.meta.outputs.helm_asset }}"
             }
           token: ${{ steps.app-token.outputs.token }}

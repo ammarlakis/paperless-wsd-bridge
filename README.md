@@ -199,7 +199,8 @@ workflow publishes:
 - a standalone Linux `amd64` release artifact,
 - a multi-arch GHCR Docker image for `linux/amd64` and `linux/arm64`, tagged
   with the release version, `major.minor`, and `latest`,
-- a packaged Helm chart attached to the GitHub release,
+- a packaged Helm chart attached to the GitHub release as
+  `paperless-wsd-bridge-helm-<version>.tgz`,
 - a Helm repository update by dispatching `ammarlakis/helm-charts`.
 
 Useful release overrides:
