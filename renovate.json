@@ -1,36 +1,16 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended",
-    "helpers:pinGitHubActionDigests"
-  ],
-  "timezone": "Europe/Berlin",
-  "dependencyDashboard": true,
-  "semanticCommits": "enabled",
-  "rangeStrategy": "bump",
-  "pinDigests": true,
-  "labels": [
-    "dependencies"
-  ],
+  "extends": ["config:recommended"],
   "ignoreDeps": [
     "ghcr.io/ammarlakis/paperless-wsd-bridge"
   ],
   "packageRules": [
     {
       "matchManagers": [
-        "github-actions"
-      ],
-      "groupName": "GitHub Actions",
-      "semanticCommitType": "ci",
-      "pinDigests": true
-    },
-    {
-      "matchManagers": [
         "dockerfile"
       ],
       "groupName": "Docker base images",
-      "semanticCommitType": "build",
-      "pinDigests": true
+      "semanticCommitType": "build"
     },
     {
       "matchManagers": [
@@ -38,21 +18,6 @@
       ],
       "groupName": "Python dependencies",
       "semanticCommitType": "fix"
-    },
-    {
-      "matchManagers": [
-        "helm-values"
-      ],
-      "groupName": "Helm values images",
-      "semanticCommitType": "build",
-      "pinDigests": true
-    },
-    {
-      "matchUpdateTypes": [
-        "digest"
-      ],
-      "groupName": "Dependency digests",
-      "semanticCommitType": "build"
     }
   ]
 }
