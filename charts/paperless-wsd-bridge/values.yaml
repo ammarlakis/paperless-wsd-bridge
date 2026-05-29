@@ -1,7 +1,6 @@
 image:
   repository: ghcr.io/ammarlakis/paperless-wsd-bridge
   tag: "0.1.6"
-  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
