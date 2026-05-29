@@ -40,7 +40,7 @@ spec:
       {{- end }}
       containers:
         - name: bridge
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "paperless-wsd-bridge.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
